@@ -44,7 +44,7 @@ def _get_llm():
     if provider == "anthropic":
         from llama_index.llms.anthropic import Anthropic  # lazy import
         return Anthropic(
-            model=os.getenv("LLM_MODEL", "claude-3-5-haiku-20241022"),
+            model=os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001"),
             api_key=os.getenv("ANTHROPIC_API_KEY"),
         )
     from llama_index.llms.openai import OpenAI  # lazy import
