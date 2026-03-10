@@ -1,0 +1,52 @@
+[
+  {
+    "id": "q01",
+    "question": "What are the three FedRAMP impact levels and how do they differ from one another?",
+    "notes": "Tests baseline knowledge of Low, Moderate, and High baselines (FIPS 199)"
+  },
+  {
+    "id": "q02",
+    "question": "What information must be included in a FedRAMP System Security Plan (SSP)?",
+    "notes": "Tests knowledge of SSP required sections: system boundary, control implementation, etc."
+  },
+  {
+    "id": "q03",
+    "question": "What is the purpose of a FedRAMP Readiness Assessment Report (RAR) and when is it required?",
+    "notes": "Tests distinction between RAR and full authorization package"
+  },
+  {
+    "id": "q04",
+    "question": "How frequently must a cloud service provider submit continuous monitoring deliverables to FedRAMP or an authorizing agency?",
+    "notes": "Tests ConMon cadence requirements (monthly, annually, etc.)"
+  },
+  {
+    "id": "q05",
+    "question": "What is a Plan of Action and Milestones (POA&M) and what fields must each entry contain?",
+    "notes": "Tests POA&M content requirements and tracking expectations"
+  },
+  {
+    "id": "q06",
+    "question": "How does FedRAMP define the authorization boundary for a cloud system and what must be included within it?",
+    "notes": "Tests boundary definition, external services, interconnections"
+  },
+  {
+    "id": "q07",
+    "question": "What encryption standards does FedRAMP require for federal data in transit and data at rest?",
+    "notes": "Tests FIPS 140-2/140-3 validation and TLS requirements"
+  },
+  {
+    "id": "q08",
+    "question": "What is the difference between a JAB Provisional Authorization to Operate (P-ATO) and an Agency Authorization to Operate (ATO)?",
+    "notes": "Tests understanding of the two FedRAMP authorization paths"
+  },
+  {
+    "id": "q09",
+    "question": "What are the penetration testing requirements for a FedRAMP Moderate system, including scope and frequency?",
+    "notes": "Tests pen test scope, rules of engagement, and annual requirement"
+  },
+  {
+    "id": "q10",
+    "question": "What multi-factor authentication requirements apply to privileged and non-privileged users of FedRAMP-authorized systems?",
+    "notes": "Tests IA-2 control requirements and digital identity guidance"
+  }
+]
