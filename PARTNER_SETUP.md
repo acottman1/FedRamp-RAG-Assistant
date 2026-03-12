@@ -223,6 +223,58 @@ Once PDFs are added and ingested, all of these will work.
 
 ---
 
+## Working with Feature Branches
+
+The `main` branch is the stable baseline.  Two feature branches extend the retrieval pipeline — you can check either out and run the app the same way.
+
+| Branch | What it adds |
+|--------|-------------|
+| `feature/multi-query-expansion` | LLM generates query variants; RRF merges results |
+| `feature/hybrid-search` | Adds BM25 keyword search on top of multi-query |
+
+### Switching branches
+
+```bash
+# Multi-query only
+git checkout feature/multi-query-expansion
+
+# Hybrid search (BM25 + vector + multi-query)
+git checkout feature/hybrid-search
+```
+
+### Extra dependency on `feature/hybrid-search`
+
+The hybrid branch requires `bm25s`, a pure-Python BM25 library.  It is **not** in `requirements.txt` yet because it came with a broken C-extension dependency (`pystemmer`) that fails to compile on Python 3.14 / Windows.  Install it separately after activating your venv:
+
+```bash
+# Make sure the venv is active first — you should see (.venv) in your prompt
+pip install llama-index-retrievers-bm25 --no-deps
+pip install bm25s
+```
+
+Verify it worked:
+
+```bash
+python -c "import bm25s; print('bm25s OK:', bm25s.__version__)"
+# Expected: bm25s OK: 0.3.2
+```
+
+You will see a harmless warning on import:
+```
+resource module not available on Windows
+```
+This just means `pystemmer` (the C stemmer) isn't installed — which is expected and intentional.  The retriever uses plain tokenization instead, which is fine for FedRAMP regulatory terminology.
+
+After installing, run the app normally:
+
+```bash
+streamlit run app/main.py
+```
+
+The first query will show BM25 indexing progress bars in the terminal as it loads all 1,300+ chunks into memory.  This takes about half a second and is cached for the rest of the session.
+
+---
+
 ## Troubleshooting
 
 **`FileNotFoundError: Vector index not found`**
@@ -231,7 +283,14 @@ You haven't run ingest yet. Run `python scripts/ingest_json.py`.
 **`openai.AuthenticationError`**
 Your `OPENAI_API_KEY` in `.env` is wrong or missing. Check it at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
 
-**`ModuleNotFoundError`**
+**`ModuleNotFoundError: No module named 'bm25s'`**
+You're on the `feature/hybrid-search` branch and `bm25s` isn't installed.  Run:
+```bash
+pip install llama-index-retrievers-bm25 --no-deps
+pip install bm25s
+```
+
+**`ModuleNotFoundError`** (any other module)
 Your virtual environment isn't activated or `pip install -r requirements.txt` wasn't run. Activate it first, then reinstall.
 
 **App gives refusals to everything**
