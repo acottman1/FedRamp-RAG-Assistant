@@ -1,40 +1,38 @@
 """RAG engine: loads the persisted ChromaDB index and answers queries with citations.
 
-Retrieval strategy: multi-query expansion via QueryFusionRetriever.
+Retrieval strategy: hybrid search (dense vector + BM25 keyword) with multi-query expansion.
 
-HOW MULTI-QUERY EXPANSION WORKS
---------------------------------
-A standard RAG system embeds the user's question once and does a single cosine
-similarity search.  That works, but it has a blind spot: if the user's phrasing
-doesn't closely match the phrasing in the source documents, the right chunks may
-never surface.
+HOW THIS PIPELINE WORKS
+------------------------
+Each user question goes through three layers before reaching the LLM:
 
-Multi-query expansion adds a step before retrieval:
-  1. An LLM generates N-1 paraphrase variants of the original question.
-  2. All N queries (original + variants) are embedded and searched independently.
-  3. The result sets are merged using Reciprocal Rank Fusion (RRF).
-  4. The top K deduplicated chunks are sent to the answer LLM as context.
+  Layer 1 — Query expansion:
+    The LLM generates NUM_QUERIES-1 paraphrase variants of the question.
+    Different phrasings cast a wider semantic net over the corpus.
 
-The key insight is that different phrasings cast a wider semantic net.  A chunk
-about "multi-factor authentication" might rank #1 under the variant
-"two-factor login requirements" but never appear under the original "MFA rules."
+  Layer 2 — Dual retrieval (hybrid search):
+    For each of the NUM_QUERIES queries, TWO retrievers run in parallel:
+      a) VectorIndexRetriever  — dense semantic search via OpenAI embeddings + ChromaDB cosine similarity
+      b) SimpleBM25Retriever   — sparse keyword search (BM25) over all chunk texts in memory
 
-RECIPROCAL RANK FUSION (RRF)
-------------------------------
-RRF is a simple, robust algorithm for merging ranked lists without needing score
-calibration between lists.  Each chunk's RRF score is:
+    Vector search is good at *semantic* similarity ("authentication" finds "login").
+    BM25 is good at *exact* matches (FRR-ADS-CSO-PUB, FIPS 199, POA&M).
+    They fail in different ways, so combining them is more robust than either alone.
 
-    score(chunk) = Σ  1 / (k + rank_in_query_i)
-                  i
+  Layer 3 — Reciprocal Rank Fusion (RRF):
+    All result sets (NUM_QUERIES queries × 2 retrievers) are merged by RRF.
+    RRF scores each chunk based on its rank across lists:
 
-where k=60 is a smoothing constant and rank_in_query_i is its position in the
-i-th query's result list (1-indexed).  A chunk that ranks highly in multiple
-queries gets a higher combined score.  A chunk that appears in only one list but
-ranks first still contributes, so nothing is discarded outright.
+        score(chunk) = Σ  1 / (60 + rank_in_list_i)
+                      i
 
-RRF was chosen over simple score averaging because cosine similarity scores from
-different queries are not directly comparable (they depend on the query vector),
-whereas rank positions are always comparable.
+    A chunk that ranks #2 in the vector results AND #1 in the BM25 results
+    beats a chunk that only appeared in one list.  60 is a smoothing constant
+    that prevents a single #1 ranking from dominating everything else.
+
+    RRF is used instead of score averaging because cosine similarities and BM25
+    scores live on completely different scales — you cannot meaningfully average them.
+    Ranks are always comparable regardless of the underlying scoring function.
 """
 
 import os
@@ -48,6 +46,8 @@ from llama_index.core.response_synthesizers import get_response_synthesizer
 from llama_index.core.retrievers import QueryFusionRetriever, VectorIndexRetriever
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
+
+from bm25_retriever import SimpleBM25Retriever
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CHROMA_PATH = PROJECT_ROOT / "data" / "chroma_db"
@@ -177,22 +177,26 @@ def _dedupe(items: list) -> list:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def build_query_engine() -> RetrieverQueryEngine:
-    """Load the persisted ChromaDB index and return a multi-query query engine.
+    """Load the persisted ChromaDB index and return a hybrid multi-query engine.
 
-    Assembly order matters here — this is the dependency graph:
+    Assembly order — the dependency graph:
 
         ChromaDB client
-            └── ChromaVectorStore
-                    └── VectorStoreIndex          (the searchable index)
-                            └── VectorIndexRetriever   (single-query vector search)
-                                    └── QueryFusionRetriever   (wraps it, adds variants)
-                                            └── RetrieverQueryEngine   (ties retriever to LLM)
+            ├── ChromaVectorStore
+            │       └── VectorStoreIndex
+            │               └── VectorIndexRetriever  (dense semantic search)
+            │                       └─┐
+            │                         ├── QueryFusionRetriever  (multi-query + RRF)
+            │                         │       └── RetrieverQueryEngine
+            └── collection.get()      │
+                    └── SimpleBM25Retriever (keyword search)
+                            └─────────┘
 
-    Each layer adds one responsibility:
-      - VectorStoreIndex: knows how to read/write to ChromaDB
-      - VectorIndexRetriever: knows how to do a single similarity search
-      - QueryFusionRetriever: knows how to generate variants and fuse results
-      - RetrieverQueryEngine: knows how to format context and call the LLM
+    Key point: QueryFusionRetriever accepts a LIST of retrievers.
+    For every query variant it generates, it runs ALL retrievers and merges
+    the results with RRF.  Adding BM25 as a second retriever is literally
+    one extra argument — the fusion machinery is already there from the
+    multi-query branch.
 
     Raises FileNotFoundError if the index has not been built yet.
     """
@@ -203,58 +207,57 @@ def build_query_engine() -> RetrieverQueryEngine:
         )
 
     # Connect to the local ChromaDB database.
-    # PersistentClient means it reads from disk every time — no in-memory
-    # state that could go stale between Streamlit reruns.
+    # PersistentClient means it reads from disk — no in-memory state that
+    # could go stale between Streamlit reruns.
     client = chromadb.PersistentClient(path=str(CHROMA_PATH))
     collection = client.get_or_create_collection(COLLECTION_NAME)
     vector_store = ChromaVectorStore(chroma_collection=collection)
 
     # Register models globally so every LlamaIndex component can find them.
-    # Settings is a global singleton — think of it like a config object that
-    # all LlamaIndex classes read from automatically.
+    # Settings is a global singleton — all LlamaIndex classes read from it.
     Settings.embed_model = _get_embed_model()
     Settings.llm = _get_llm()
 
-    # Build the index object from the existing vector store.
+    # Build the LlamaIndex wrapper around the ChromaDB vector store.
     # from_vector_store() does NOT re-embed anything — it just wraps the
-    # ChromaDB collection so LlamaIndex can query it.
+    # collection so LlamaIndex can query it.
     index = VectorStoreIndex.from_vector_store(vector_store)
 
-    # ── Layer 1: single-query vector retriever ────────────────────────────────
-    # This is the same retriever we had before.  It takes one query string,
-    # embeds it, and returns the FUSION_TOP_K most similar chunks.
-    # We set similarity_top_k to FUSION_TOP_K (not TOP_K) here because we want
-    # each of the NUM_QUERIES queries to bring back a wider set of candidates.
-    # The fusion step will trim the merged pool down to TOP_K for the LLM.
-    base_retriever = VectorIndexRetriever(
+    # ── Retriever A: dense vector search ──────────────────────────────────────
+    # Embeds each query and finds chunks with similar embedding vectors.
+    # Good at semantic similarity: "authentication" → "login", "key management".
+    # similarity_top_k=FUSION_TOP_K because we want a wide candidate pool per
+    # query before RRF trims it down to TOP_K for the LLM.
+    vector_retriever = VectorIndexRetriever(
         index=index,
         similarity_top_k=FUSION_TOP_K,
     )
 
-    # ── Layer 2: multi-query fusion retriever ─────────────────────────────────
-    # QueryFusionRetriever wraps base_retriever and adds the expansion logic.
+    # ── Retriever B: BM25 keyword search ──────────────────────────────────────
+    # Loads all 1,300+ chunk texts from ChromaDB and builds an in-memory
+    # inverted index.  No embeddings needed — pure term-frequency math.
+    # Good at exact matches: FRR-ADS-CSO-PUB, FIPS 199, POA&M, specific IDs.
     #
-    # Parameters explained:
-    #   retrievers         — list of underlying retrievers to run each query through.
-    #                        We only have one (vector search), but the API accepts
-    #                        multiple — which is how you'd add BM25 later (hybrid search).
+    # This is the one-time expensive step (~0.5s on first load).
+    # Streamlit's @st.cache_resource caches build_query_engine() across reruns,
+    # so this only happens once per server session, not per query.
+    bm25_retriever = SimpleBM25Retriever.from_chromadb(
+        collection=collection,
+        similarity_top_k=FUSION_TOP_K,
+    )
+
+    # ── Fusion retriever: multi-query + RRF over both retrievers ──────────────
+    # QueryFusionRetriever runs every query variant through EVERY retriever in
+    # the list, then merges all result sets with Reciprocal Rank Fusion.
     #
-    #   similarity_top_k   — final number of chunks returned after fusion.
-    #                        This is what the LLM will see.
+    # With NUM_QUERIES=4 and 2 retrievers:
+    #   4 query variants × 2 retrievers = 8 retrieval calls per user question
+    #   Each returns up to FUSION_TOP_K=8 chunks
+    #   RRF pool: up to 64 candidates → final TOP_K=5 sent to the LLM
     #
-    #   num_queries        — total queries including the original.  The retriever
-    #                        calls the LLM to generate (num_queries - 1) variants.
-    #
-    #   mode               — fusion algorithm.
-    #                        "reciprocal_rerank" → RRF (described in the module docstring)
-    #                        "simple"            → just concatenate and dedupe (no reranking)
-    #
-    #   use_async          — whether to run the NUM_QUERIES searches concurrently.
-    #                        False here because Streamlit manages its own event loop
-    #                        and mixing async contexts causes errors.  In a non-Streamlit
-    #                        context (e.g., a FastAPI server), set this to True for speed.
+    # use_async=False: Streamlit has its own event loop; nested async crashes.
     fusion_retriever = QueryFusionRetriever(
-        retrievers=[base_retriever],
+        retrievers=[vector_retriever, bm25_retriever],
         similarity_top_k=TOP_K,
         num_queries=NUM_QUERIES,
         mode="reciprocal_rerank",
@@ -320,5 +323,5 @@ def query(engine: RetrieverQueryEngine, question: str) -> dict:
         "answer": answer,
         "citations": citations,
         "chunks": chunks,
-        "retrieval_mode": "multi-query",
+        "retrieval_mode": "hybrid (vector + BM25, multi-query)",
     }
