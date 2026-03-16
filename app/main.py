@@ -72,7 +72,8 @@ with st.sidebar:
     st.markdown(
         "This assistant uses **Retrieval-Augmented Generation** (RAG) to answer "
         "FedRAMP questions from a local document corpus.\n\n"
-        "It will refuse to answer if the retrieved documents do not support a response."
+        "It will refuse to answer if the retrieved documents do not support a response.\n\n"
+        "**Retrieval:** Multi-query expansion with Reciprocal Rank Fusion."
     )
     st.divider()
     st.markdown(f"**Log file:** `{LOG_PATH.relative_to(_PROJECT_ROOT)}`")
@@ -92,11 +93,12 @@ def _render_message(msg: dict) -> None:
         if msg.get("citations"):
             st.caption("**Sources:** " + " · ".join(msg["citations"]))
         if msg.get("chunks"):
-            with st.expander("Retrieved context", expanded=False):
+            mode = msg.get("retrieval_mode", "single-query")
+            with st.expander(f"Retrieved context  ·  {mode}", expanded=False):
                 for chunk in msg["chunks"]:
                     label = chunk.get("citation", "chunk")
                     score = chunk.get("score")
-                    header = f"**{label}**" + (f"  ·  score: {score}" if score else "")
+                    header = f"**{label}**" + (f"  ·  RRF score: {score}" if score else "")
                     st.markdown(header)
                     st.text(chunk["text"][:600])
                     st.divider()
@@ -133,11 +135,12 @@ if prompt := st.chat_input("Ask a FedRAMP question…"):
         if result["citations"]:
             st.caption("**Sources:** " + " · ".join(result["citations"]))
         if result["chunks"]:
-            with st.expander("Retrieved context", expanded=False):
+            mode = result.get("retrieval_mode", "single-query")
+            with st.expander(f"Retrieved context  ·  {mode}", expanded=False):
                 for chunk in result["chunks"]:
                     label = chunk.get("citation", "chunk")
                     score = chunk.get("score")
-                    header = f"**{label}**" + (f"  ·  score: {score}" if score else "")
+                    header = f"**{label}**" + (f"  ·  RRF score: {score}" if score else "")
                     st.markdown(header)
                     st.text(chunk["text"][:600])
                     st.divider()
@@ -148,6 +151,7 @@ if prompt := st.chat_input("Ask a FedRAMP question…"):
             "content": result["answer"],
             "citations": result["citations"],
             "chunks": result["chunks"],
+            "retrieval_mode": result.get("retrieval_mode", "single-query"),
         }
     )
     _log(prompt, result)
